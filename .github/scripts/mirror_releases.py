@@ -4,7 +4,6 @@ import sys
 from pathlib import Path
 
 def run_cmd(cmd, check=True):
-    """执行 shell 命令"""
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
     if check and result.returncode != 0:
         print(f"❌ Command failed: {cmd}")
@@ -13,7 +12,6 @@ def run_cmd(cmd, check=True):
     return result
 
 def get_latest_release(owner, repo):
-    """获取上游仓库最新 Release"""
     cmd = f"gh release view --repo {owner}/{repo} --json tagName,assets,name,body"
     result = run_cmd(cmd, check=False)
     if result.returncode != 0:
@@ -21,22 +19,26 @@ def get_latest_release(owner, repo):
         return None
     return json.loads(result.stdout)
 
-def tag_exists(tag):
-    """检查当前仓库是否已存在该 tag"""
-    result = run_cmd(f"git tag -l '{tag}'", check=False)
-    return bool(result.stdout.strip())
+def load_last_synced():
+    path = Path("last_synced.json")
+    if path.exists():
+        with open(path, encoding='utf-8') as f:
+            return json.load(f)
+    return {}
+
+def save_last_synced(data):
+    with open("last_synced.json", "w", encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
 
 def should_rename_assets(assets, tag_name):
-    """自动判断是否需要重命名资产"""
     if not assets:
         return False
-    
     tag_clean = tag_name.lower().lstrip('v')
     for asset in assets:
         name_lower = asset['name'].lower()
         if tag_clean in name_lower or tag_name.lower() in name_lower:
-            return False  # 包含 tag → 情况2：保持原名
-    return True  # 不包含 tag → 情况1：需要重命名
+            return False
+    return True
 
 def main():
     config_path = Path("repo.config.json")
@@ -44,19 +46,21 @@ def main():
         print("❌ Error: repo.config.json not found!")
         sys.exit(1)
 
+    last_synced = load_last_synced()
+
     with open(config_path, encoding='utf-8') as f:
         repos = json.load(f)
 
     print("🚀 开始同步 Release...\n")
+    updated = False
 
     for item in repos:
         owner = item["owner"]
         repo = item["repo"]
-        # 自动生成 prefix（可手动覆盖）
         prefix = item.get("asset_rename_prefix", repo)
 
         print(f"{'='*75}")
-        print(f"📦 处理仓库: {owner}/{repo}  (prefix: {prefix})")
+        print(f"📦 处理仓库: {owner}/{repo}")
 
         release = get_latest_release(owner, repo)
         if not release:
@@ -65,20 +69,32 @@ def main():
         upstream_tag = release["tagName"]
         assets = release.get("assets", [])
 
-        # 自动识别类型
+        # ==================== 新增：检查是否有新版本 ====================
+        last_tag = last_synced.get(f"{owner}/{repo}")
+        if last_tag == upstream_tag:
+            print(f"   ✅ 已是最新版本 ({upstream_tag})，跳过")
+            continue
+        else:
+            print(f"   🔄 发现新版本: {last_tag or '无记录'} → {upstream_tag}")
+
+        # ============================================================
+
         rename_assets = should_rename_assets(assets, upstream_tag)
+
         print(f"   🔍 自动识别: {'情况1 - 需要重命名' if rename_assets else '情况2 - 保持原名'}")
 
-        # 决定本仓库使用的 Tag
         our_tag = f"{prefix}-{upstream_tag}" if rename_assets else upstream_tag
 
-        if tag_exists(our_tag):
+        # 检查本仓库是否已存在该 tag
+        result = run_cmd(f"gh release view {our_tag} --json tagName", check=False)
+        if result.returncode == 0:
             print(f"   ✅ Tag {our_tag} 已存在，跳过")
+            # 即使已存在，也更新记录（防止下次重复判断）
+            last_synced[f"{owner}/{repo}"] = upstream_tag
             continue
 
-        print(f"   🔄 发现新版本: {upstream_tag} → 创建 Tag: {our_tag}")
+        print(f"   📥 开始下载并创建新 Release...")
 
-        # 创建临时目录
         temp_dir = Path(f"temp_{repo}")
         temp_dir.mkdir(exist_ok=True)
         downloaded_files = []
@@ -96,7 +112,6 @@ def main():
 
             local_path = temp_dir / new_name
 
-            # 下载文件
             run_cmd(f'''
                 curl -L \
                   -H "Accept: application/octet-stream" \
@@ -107,10 +122,9 @@ def main():
             downloaded_files.append(str(local_path))
 
         if not downloaded_files:
-            print("   ⚠️ 没有找到任何资产文件，跳过")
+            print("   ⚠️ 没有找到资产文件，跳过")
             continue
 
-        # 准备 Release 描述
         body = f"""Mirrored from [{owner}/{repo}](https://github.com/{owner}/{repo}/releases/tag/{upstream_tag})
 
 {release.get('body', 'No description provided.')}
@@ -118,7 +132,6 @@ def main():
 
         files_str = " ".join(f'"{f}"' for f in downloaded_files)
 
-        # 创建 Release 并上传文件
         run_cmd(f'''
             gh release create "{our_tag}" \
                 --title "{prefix} {upstream_tag}" \
@@ -128,10 +141,18 @@ def main():
 
         print(f"   🎉 成功创建 Release: {our_tag}")
 
-        # 清理临时目录
+        # 更新记录
+        last_synced[f"{owner}/{repo}"] = upstream_tag
+        updated = True
+
         run_cmd(f"rm -rf {temp_dir}", check=False)
 
-    print("\n🎉 所有仓库同步处理完成！")
+    # 保存同步记录
+    if updated:
+        save_last_synced(last_synced)
+        print("\n💾 已更新 last_synced.json 记录")
+    
+    print("\n🎉 所有仓库处理完成！")
 
 if __name__ == "__main__":
     main()
