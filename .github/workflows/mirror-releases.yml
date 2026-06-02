@@ -2,8 +2,8 @@ name: Mirror Latest Releases
 
 on:
   schedule:
-    - cron: '0 2 * * *'      # 每天北京时间早上10点执行
-  workflow_dispatch:         # 支持手动触发
+    - cron: '0 2 * * *'
+  workflow_dispatch:
 
 jobs:
   mirror:
@@ -15,11 +15,15 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Setup Git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --tags --force
 
       - name: Install dependencies
         run: |
