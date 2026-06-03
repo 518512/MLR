@@ -25,17 +25,21 @@ def load_last_synced():
         try:
             with open(path, encoding='utf-8') as f:
                 content = f.read().strip()
-                if not content or content == "":
+                if not content:
                     return {}
-                return json.loads(content)
-        except json.JSONDecodeError:
-            print("   ⚠️ last_synced.json 格式错误，已重置为空")
+                return json.load(f)
+        except:
+            print("   ⚠️ last_synced.json 读取失败，使用空记录")
             return {}
     return {}
 
 def save_last_synced(data):
-    with open("last_synced.json", "w", encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    try:
+        with open("last_synced.json", "w", encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        print("   💾 last_synced.json 已保存")
+    except Exception as e:
+        print(f"   ❌ 保存 last_synced.json 失败: {e}")
 
 def release_exists(tag):
     result = run_cmd(f"gh release view {tag} --json tagName", check=False)
@@ -48,6 +52,7 @@ def main():
         sys.exit(1)
 
     last_synced = load_last_synced()
+    print(f"📋 当前同步记录: {len(last_synced)} 个仓库")
 
     with open(config_path, encoding='utf-8') as f:
         repos = json.load(f)
@@ -60,11 +65,12 @@ def main():
         prefix = item.get("asset_rename_prefix", repo)
         fixed_tag = repo
 
-        print(f"{'='*85}")
-        print(f"📦 处理仓库: {owner}/{repo} → 固定 Tag: {fixed_tag}")
+        print(f"{'='*90}")
+        print(f"📦 处理: {owner}/{repo} → Tag: {fixed_tag}")
 
         release = get_latest_release(owner, repo)
         if not release:
+            print("   ⚠️ 无法获取 release，跳过")
             continue
 
         upstream_tag = release["tagName"]
@@ -74,14 +80,14 @@ def main():
         if last_tag == upstream_tag:
             print(f"   ✅ 已是最新版本 ({upstream_tag})，跳过")
             continue
-        else:
-            print(f"   🔄 发现新版本: {last_tag or '无记录'} → {upstream_tag}")
+
+        print(f"   🔄 新版本: {last_tag or '首次'} → {upstream_tag}")
 
         rename_assets = any(not (upstream_tag.lower().lstrip('v') in a['name'].lower() or 
                                 upstream_tag.lower() in a['name'].lower()) 
                            for a in assets) if assets else False
 
-        print(f"   🔍 自动识别: {'情况1 - 需要重命名' if rename_assets else '情况2 - 保持原名'}")
+        print(f"   🔍 自动识别: {'需要重命名' if rename_assets else '保持原名'}")
 
         temp_dir = Path(f"temp_{repo}")
         temp_dir.mkdir(exist_ok=True)
@@ -93,10 +99,8 @@ def main():
 
             if rename_assets:
                 new_name = f"{prefix}-{upstream_tag}-{original_name}"
-                print(f"   📦 重命名: {original_name} → {new_name}")
             else:
                 new_name = original_name
-                print(f"   📦 保持原名: {original_name}")
 
             local_path = temp_dir / new_name
 
@@ -110,22 +114,18 @@ def main():
             downloaded_files.append(str(local_path))
 
         if not downloaded_files:
-            print("   ⚠️ 没有找到资产文件，跳过")
+            print("   ⚠️ 没有资产文件，跳过")
             continue
-
-        body = f"""Mirrored from [{owner}/{repo}](https://github.com/{owner}/{repo}/releases/tag/{upstream_tag})
-**上游版本**: `{upstream_tag}`
-
-{release.get('body', 'No description provided.')}
-"""
 
         files_str = " ".join(f'"{f}"' for f in downloaded_files)
 
         if release_exists(fixed_tag):
-            print(f"   ➕ 追加新 Assets 到现有 Release...")
+            print(f"   ➕ 追加 Assets 到 {fixed_tag}")
             run_cmd(f'gh release upload "{fixed_tag}" {files_str} --clobber')
         else:
-            print(f"   ✨ 首次创建 Release...")
+            print(f"   ✨ 首次创建 Release {fixed_tag}")
+            body = f"""Mirrored from [{owner}/{repo}](https://github.com/{owner}/{repo}/releases/tag/{upstream_tag})
+**上游版本**: `{upstream_tag}`"""
             run_cmd(f'''
                 gh release create "{fixed_tag}" \
                     --title "{prefix} Latest" \
@@ -135,11 +135,12 @@ def main():
 
         print(f"   🎉 处理完成: {fixed_tag} (上游: {upstream_tag})")
 
+        # 立即更新记录并保存
         last_synced[f"{owner}/{repo}"] = upstream_tag
+        save_last_synced(last_synced)        # ← 每次都保存
+
         run_cmd(f"rm -rf {temp_dir}", check=False)
 
-    save_last_synced(last_synced)
-    print("\n💾 已更新 last_synced.json")
     print("\n🎉 所有仓库处理完成！")
 
 if __name__ == "__main__":
