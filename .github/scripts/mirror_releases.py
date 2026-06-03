@@ -8,7 +8,8 @@ def run_cmd(cmd, check=True):
     if check and result.returncode != 0:
         print(f"❌ Command failed: {cmd}")
         print(result.stderr)
-        sys.exit(1)
+        # 不立即退出，让脚本继续运行
+        return result
     return result
 
 def get_latest_release(owner, repo):
@@ -25,11 +26,8 @@ def load_last_synced():
         try:
             with open(path, encoding='utf-8') as f:
                 content = f.read().strip()
-                if not content:
-                    return {}
-                return json.load(f)
+                return json.loads(content) if content else {}
         except:
-            print("   ⚠️ last_synced.json 读取失败，使用空记录")
             return {}
     return {}
 
@@ -37,13 +35,11 @@ def save_last_synced(data):
     try:
         with open("last_synced.json", "w", encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
-        print("   💾 last_synced.json 已保存")
+        print("   💾 last_synced.json 文件已写入")
+        return True
     except Exception as e:
-        print(f"   ❌ 保存 last_synced.json 失败: {e}")
-
-def release_exists(tag):
-    result = run_cmd(f"gh release view {tag} --json tagName", check=False)
-    return result.returncode == 0
+        print(f"   ❌ 写入 last_synced.json 失败: {e}")
+        return False
 
 def main():
     config_path = Path("repo.config.json")
@@ -52,12 +48,12 @@ def main():
         sys.exit(1)
 
     last_synced = load_last_synced()
-    print(f"📋 当前同步记录: {len(last_synced)} 个仓库")
 
     with open(config_path, encoding='utf-8') as f:
         repos = json.load(f)
 
     print("🚀 开始同步 Release (Assets 累积模式)...\n")
+    updated_any = False
 
     for item in repos:
         owner = item["owner"]
@@ -70,18 +66,16 @@ def main():
 
         release = get_latest_release(owner, repo)
         if not release:
-            print("   ⚠️ 无法获取 release，跳过")
             continue
 
         upstream_tag = release["tagName"]
         assets = release.get("assets", [])
 
-        last_tag = last_synced.get(f"{owner}/{repo}")
-        if last_tag == upstream_tag:
+        if last_synced.get(f"{owner}/{repo}") == upstream_tag:
             print(f"   ✅ 已是最新版本 ({upstream_tag})，跳过")
             continue
 
-        print(f"   🔄 新版本: {last_tag or '首次'} → {upstream_tag}")
+        print(f"   🔄 新版本: {last_synced.get(f'{owner}/{repo}') or '首次'} → {upstream_tag}")
 
         rename_assets = any(not (upstream_tag.lower().lstrip('v') in a['name'].lower() or 
                                 upstream_tag.lower() in a['name'].lower()) 
@@ -96,21 +90,11 @@ def main():
         for asset in assets:
             original_name = asset["name"]
             download_url = asset["url"]
-
-            if rename_assets:
-                new_name = f"{prefix}-{upstream_tag}-{original_name}"
-            else:
-                new_name = original_name
+            new_name = f"{prefix}-{upstream_tag}-{original_name}" if rename_assets else original_name
+            print(f"   📦 {'重命名' if rename_assets else '保持原名'}: {original_name}")
 
             local_path = temp_dir / new_name
-
-            run_cmd(f'''
-                curl -L \
-                  -H "Accept: application/octet-stream" \
-                  -H "Authorization: token $GH_TOKEN" \
-                  "{download_url}" -o "{local_path}"
-            ''')
-
+            run_cmd(f'curl -L -H "Accept: application/octet-stream" -H "Authorization: token $GH_TOKEN" "{download_url}" -o "{local_path}"')
             downloaded_files.append(str(local_path))
 
         if not downloaded_files:
@@ -119,27 +103,34 @@ def main():
 
         files_str = " ".join(f'"{f}"' for f in downloaded_files)
 
-        if release_exists(fixed_tag):
-            print(f"   ➕ 追加 Assets 到 {fixed_tag}")
+        if run_cmd(f"gh release view {fixed_tag} --json tagName", check=False).returncode == 0:
+            print(f"   ➕ 追加新 Assets...")
             run_cmd(f'gh release upload "{fixed_tag}" {files_str} --clobber')
         else:
-            print(f"   ✨ 首次创建 Release {fixed_tag}")
+            print(f"   ✨ 首次创建 Release...")
             body = f"""Mirrored from [{owner}/{repo}](https://github.com/{owner}/{repo}/releases/tag/{upstream_tag})
 **上游版本**: `{upstream_tag}`"""
-            run_cmd(f'''
-                gh release create "{fixed_tag}" \
-                    --title "{prefix} Latest" \
-                    --notes '{body}' \
-                    {files_str}
-            ''')
+            run_cmd(f'gh release create "{fixed_tag}" --title "{prefix} Latest" --notes \'{body}\' {files_str}')
 
         print(f"   🎉 处理完成: {fixed_tag} (上游: {upstream_tag})")
 
-        # 立即更新记录并保存
         last_synced[f"{owner}/{repo}"] = upstream_tag
-        save_last_synced(last_synced)        # ← 每次都保存
+        updated_any = True
 
         run_cmd(f"rm -rf {temp_dir}", check=False)
+
+    if updated_any:
+        if save_last_synced(last_synced):
+            # 自动提交并推送 last_synced.json
+            print("   📤 正在提交 last_synced.json 到仓库...")
+            run_cmd('git config user.name "github-actions[bot]"')
+            run_cmd('git config user.email "41898282+github-actions[bot]@users.noreply.github.com"')
+            run_cmd('git add last_synced.json')
+            run_cmd('git commit -m "chore: update last_synced.json"')
+            run_cmd('git push')
+            print("   ✅ last_synced.json 已成功提交并推送")
+    else:
+        print("   ℹ️ 没有仓库更新，跳过保存")
 
     print("\n🎉 所有仓库处理完成！")
 
