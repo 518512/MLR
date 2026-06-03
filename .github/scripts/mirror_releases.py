@@ -19,21 +19,27 @@ def get_latest_release(owner, repo):
         return None
     return json.loads(result.stdout)
 
-def release_exists(tag):
-    """检查 Release 是否已存在"""
-    result = run_cmd(f"gh release view {tag} --json tagName", check=False)
-    return result.returncode == 0
-
 def load_last_synced():
     path = Path("last_synced.json")
     if path.exists():
-        with open(path, encoding='utf-8') as f:
-            return json.load(f)
+        try:
+            with open(path, encoding='utf-8') as f:
+                content = f.read().strip()
+                if not content or content == "":
+                    return {}
+                return json.loads(content)
+        except json.JSONDecodeError:
+            print("   ⚠️ last_synced.json 格式错误，已重置为空")
+            return {}
     return {}
 
 def save_last_synced(data):
     with open("last_synced.json", "w", encoding='utf-8') as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+
+def release_exists(tag):
+    result = run_cmd(f"gh release view {tag} --json tagName", check=False)
+    return result.returncode == 0
 
 def main():
     config_path = Path("repo.config.json")
@@ -52,8 +58,6 @@ def main():
         owner = item["owner"]
         repo = item["repo"]
         prefix = item.get("asset_rename_prefix", repo)
-
-        # 使用 repo 名称作为固定 Tag
         fixed_tag = repo
 
         print(f"{'='*85}")
@@ -66,7 +70,6 @@ def main():
         upstream_tag = release["tagName"]
         assets = release.get("assets", [])
 
-        # 检查是否有新版本
         last_tag = last_synced.get(f"{owner}/{repo}")
         if last_tag == upstream_tag:
             print(f"   ✅ 已是最新版本 ({upstream_tag})，跳过")
@@ -74,7 +77,6 @@ def main():
         else:
             print(f"   🔄 发现新版本: {last_tag or '无记录'} → {upstream_tag}")
 
-        # 自动判断是否需要重命名
         rename_assets = any(not (upstream_tag.lower().lstrip('v') in a['name'].lower() or 
                                 upstream_tag.lower() in a['name'].lower()) 
                            for a in assets) if assets else False
@@ -119,13 +121,9 @@ def main():
 
         files_str = " ".join(f'"{f}"' for f in downloaded_files)
 
-        # ==================== 核心逻辑：累积 Assets ====================
         if release_exists(fixed_tag):
-            print(f"   ➕ Release 已存在，追加新 Assets...")
-            run_cmd(f'''
-                gh release upload "{fixed_tag}" {files_str} --clobber
-            ''')
-            print(f"   ✅ 已成功追加新版本 Assets 到 {fixed_tag}")
+            print(f"   ➕ 追加新 Assets 到现有 Release...")
+            run_cmd(f'gh release upload "{fixed_tag}" {files_str} --clobber')
         else:
             print(f"   ✨ 首次创建 Release...")
             run_cmd(f'''
@@ -134,9 +132,9 @@ def main():
                     --notes '{body}' \
                     {files_str}
             ''')
-            print(f"   🎉 成功创建 Release: {fixed_tag}")
 
-        # 更新同步记录
+        print(f"   🎉 处理完成: {fixed_tag} (上游: {upstream_tag})")
+
         last_synced[f"{owner}/{repo}"] = upstream_tag
         run_cmd(f"rm -rf {temp_dir}", check=False)
 
